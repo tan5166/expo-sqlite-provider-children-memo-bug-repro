@@ -1,56 +1,94 @@
-# Welcome to your Expo app 👋
+# expo-sqlite SQLiteProvider children memo bug repro
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Minimal reproduction for a bug in `expo-sqlite` where `SQLiteProvider` skips re-renders when `children` change.
 
-## Get started
+## Bug Summary
 
-1. Install dependencies
+`SQLiteProvider` is wrapped with `React.memo` using a custom comparator in [`packages/expo-sqlite/src/hooks.tsx` lines 114–121](https://github.com/expo/expo/blob/main/packages/expo-sqlite/src/hooks.tsx#L114-L121). The comparator checks `databaseName`, `options`, `assetSource`, `directory`, `onInit`, `onError`, and `useSuspense` — but **omits `children`**. This means when `children` changes (e.g., switching between JSX nodes based on state), `SQLiteProvider` does not re-render and the UI stays stale.
 
-   ```bash
-   npm install
-   ```
+## Root Cause
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```ts
+// packages/expo-sqlite/src/hooks.tsx lines 114–121
+(prevProps: SQLiteProviderProps, nextProps: SQLiteProviderProps) =>
+  prevProps.databaseName === nextProps.databaseName &&
+  deepEqual(prevProps.options, nextProps.options) &&
+  deepEqual(prevProps.assetSource, nextProps.assetSource) &&
+  prevProps.directory === nextProps.directory &&
+  prevProps.onInit === nextProps.onInit &&
+  prevProps.onError === nextProps.onError &&
+  prevProps.useSuspense === nextProps.useSuspense;
+// `children` is never compared — always returns true when other props are stable
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+`children` is missing from the comparator. When all other props are stable (the common case), the comparator always returns `true`, telling React to skip re-rendering — even if `children` changed.
 
-### Other setup steps
+## Steps to Reproduce
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+1. Wrap your app in `<SQLiteProvider>`
+2. Inside the provider, render different children based on a state value (e.g., `dbInit`)
+3. Update that state inside `onInit`
+4. Observe that the UI never updates to reflect the new children
 
-## Learn more
+```tsx
+export default function RootLayout() {
+  const [dbInit, setDbInit] = useState(false);
 
-To learn more about developing your project with Expo, look at the following resources:
+  return (
+    <SQLiteProvider
+      databaseName="repro"
+      options={{ enableChangeListener: true }}
+      onInit={async () => {
+        setDbInit(true);
+      }}
+    >
+      {dbInit ? (
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        </Stack>
+      ) : (
+        <View
+          style={{ flex: 1, justifyContent: "center", alignItems: "center" }}
+        >
+          <Text>dbInit: {String(dbInit)}</Text>
+        </View>
+      )}
+    </SQLiteProvider>
+  );
+}
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+**Expected:** After `onInit` sets `dbInit` to `true`, the `<Stack>` is rendered.
 
-## Join the community
+**Actual:** The UI remains on the loading screen — `SQLiteProvider` never re-renders because `children` is not included in the memo comparator.
 
-Join our community of developers creating universal apps.
+## Run This Repro
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+npm install
+npm start
+```
+
+Open on iOS simulator or Android emulator. The app will be stuck on the loading screen and never transition to the home tab.
+
+## Environment
+
+- `expo-sqlite`: `~55.0.15`
+- `expo`: `~55.x`
+- Platform: iOS / Android
+
+## Proposed Fix
+
+Add `prevProps.children === nextProps.children` to the comparator:
+
+```ts
+(prevProps: SQLiteProviderProps, nextProps: SQLiteProviderProps) =>
+  prevProps.databaseName === nextProps.databaseName &&
+  deepEqual(prevProps.options, nextProps.options) &&
+  deepEqual(prevProps.assetSource, nextProps.assetSource) &&
+  prevProps.directory === nextProps.directory &&
+  prevProps.onInit === nextProps.onInit &&
+  prevProps.onError === nextProps.onError &&
+  prevProps.useSuspense === nextProps.useSuspense &&
+  prevProps.children === nextProps.children; // add this
+```
